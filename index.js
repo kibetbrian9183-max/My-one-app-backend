@@ -173,4 +173,21 @@ app.use((err, _req, res, _next) => {
 });
 
 await mongoose.connect(MONGODB_URI);
-app.listen(PORT, () => console.log(`API ready on http://localhost:${PORT}`));
+
+// Health check / homepage
+app.get("/", (_req, res) => {
+  res.json({
+    status: "ok",
+    message: "OneApp backend is running"
+  });
+});
+
+app.get("/health", (_req, res) => {
+  res.json({
+    status: "ok"
+  });
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`API ready on 0.0.0.0:${PORT}`);
+});
