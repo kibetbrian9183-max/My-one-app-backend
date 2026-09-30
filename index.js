@@ -7,7 +7,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
 
-const { MONGODB_URI, JWT_SECRET, ADMIN_KEY, PORT = 4000, CLIENT_ORIGIN = 'http://localhost:5173' } = process.env;
+const { MONGODB_URI, JWT_SECRET, ADMIN_KEY, PORT = 4000, CLIENT_ORIGIN = 'https://my-oneapp-c6h96xozd-kibet23.vercel.app' } = process.env;
 if (!MONGODB_URI || !JWT_SECRET) {
   console.error('Set MONGODB_URI and JWT_SECRET in server/.env (see .env.example)');
   process.exit(1);
