@@ -7,9 +7,9 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
 
-const { MONGODB_URI, JWT_SECRET, ADMIN_KEY, PORT = 4000, CLIENT_ORIGIN = 'https://my-oneapp-c6h96xozd-kibet23.vercel.app' } = process.env;
+const { MONGODB_URI, JWT_SECRET, ADMIN_KEY, PORT = 4000, CLIENT_ORIGIN = 'http://localhost:5173' } = process.env;
 if (!MONGODB_URI || !JWT_SECRET) {
-  console.error('Set MONGODB_URI and JWT_SECRET in server/.env (see .env.example)');
+  console.error('Set MONGODB_URI and JWT_SECRET in the environment (see .env.example)');
   process.exit(1);
 }
 
@@ -34,7 +34,7 @@ const Txn = mongoose.model('Transaction', new mongoose.Schema({
 
 /* ---------- Helpers ---------- */
 const PHONE_RE = /^(?:\+?254|0)[17]\d{8}$/;
-const FEE_TIERS = [ // keep in sync with the client: [highest amount in band, fee]
+const FEE_TIERS = [ // keep in sync with the front end: [highest amount in band, fee]
   [49, 0], [100, 0], [500, 7], [1000, 13], [1500, 23], [2500, 33], [3500, 53], [5000, 57],
   [7500, 78], [10000, 90], [15000, 100], [20000, 105], [35000, 108], [50000, 108], [250000, 108],
 ];
@@ -60,15 +60,18 @@ async function checkPin(user, pin) {
     const mins = Math.ceil((user.lockedUntil - Date.now()) / 60000);
     throw new HttpError(423, `Too many wrong attempts. Try again in ${mins} min.`);
   }
-  if (await bcrypt.compare(String(pin), user.pinHash)) {
-    if (user.failedAttempts) { user.failedAttempts = 0; user.lockedUntil = undefined; await user.save(); }
+  if (await bcrypt.compare(String(pin ?? ''), user.pinHash)) {
+    if (user.failedAttempts || user.lockedUntil) { user.failedAttempts = 0; user.lockedUntil = undefined; await user.save(); }
     return;
   }
   user.failedAttempts += 1;
-  if (user.failedAttempts >= MAX_ATTEMPTS) { user.lockedUntil = new Date(Date.now() + LOCK_MINUTES * 60000); user.failedAttempts = 0; }
-  await user.save();
+  const locked = user.failedAttempts >= MAX_ATTEMPTS;
   const left = MAX_ATTEMPTS - user.failedAttempts;
-  throw new HttpError(403, user.lockedUntil > new Date() ? `Too many wrong attempts. Locked for ${LOCK_MINUTES} min.` : `Wrong PIN. ${left} attempt${left === 1 ? '' : 's'} left.`);
+  if (locked) { user.lockedUntil = new Date(Date.now() + LOCK_MINUTES * 60000); user.failedAttempts = 0; }
+  await user.save();
+  throw new HttpError(403, locked
+    ? `Too many wrong attempts. Locked for ${LOCK_MINUTES} min.`
+    : `Wrong PIN. ${left} attempt${left === 1 ? '' : 's'} left.`);
 }
 
 const wrap = (fn) => (req, res, next) => fn(req, res).catch(next);
@@ -81,8 +84,19 @@ const auth = (req, _res, next) => {
 
 /* ---------- App ---------- */
 const app = express();
-app.use(cors({ origin: CLIENT_ORIGIN }));
+app.set('trust proxy', 1); // behind Render's proxy: rate limiting must see each visitor's real IP
+
+// Allowed websites: everything in CLIENT_ORIGIN (comma separated) plus this project's Vercel URLs.
+const origins = CLIENT_ORIGIN.split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean);
+const vercelPattern = /^https:\/\/my-oneapp[a-z0-9-]*\.vercel\.app$/; // change if your Vercel project has another name
+app.use(cors({
+  origin: (origin, cb) => cb(null, !origin || origins.includes(origin) || vercelPattern.test(origin)),
+}));
 app.use(express.json({ limit: '10kb' }));
+
+// Health checks
+app.get('/', (_req, res) => res.json({ status: 'ok', message: 'OneApp backend is running' }));
+app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
 // Sign in. A phone number we have not seen yet is registered with the PIN entered.
 app.post('/api/auth/login', rateLimit({ windowMs: 15 * 60000, limit: 30, standardHeaders: true, legacyHeaders: false }), wrap(async (req, res) => {
@@ -167,27 +181,21 @@ app.patch('/api/admin/users/:phone', wrap(async (req, res) => {
   res.json(publicUser(user));
 }));
 
+// Unknown routes
+app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
+
+// Errors (keep this last)
 app.use((err, _req, res, _next) => {
   if (!err.status) console.error(err);
   res.status(err.status || 500).json({ error: err.status ? err.message : 'Something went wrong on the server.' });
 });
 
-await mongoose.connect(MONGODB_URI);
-
-// Health check / homepage
-app.get("/", (_req, res) => {
-  res.json({
-    status: "ok",
-    message: "OneApp backend is running"
-  });
-});
-
-app.get("/health", (_req, res) => {
-  res.json({
-    status: "ok"
-  });
-});
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`API ready on 0.0.0.0:${PORT}`);
-});
+/* ---------- Start ---------- */
+try {
+  await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 10000 });
+} catch (err) {
+  console.error('Could not connect to MongoDB:', err.message);
+  console.error('Check MONGODB_URI (user, password, database name) and that Atlas Network Access allows 0.0.0.0/0.');
+  process.exit(1);
+}
+app.listen(PORT, '0.0.0.0', () => console.log(`API ready on 0.0.0.0:${PORT}`));
